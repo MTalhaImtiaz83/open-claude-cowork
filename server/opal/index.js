@@ -19,6 +19,10 @@ import {
   checkIntakeGate,
 } from './pipeline.js';
 import { ensureProjectDir, listAssets, saveAsset, readAsset, approveAsset } from './vault.js';
+import { getAdaAgent } from './agents/ada-agent.js';
+import { parsePdf } from './parsers/pdf-parser.js';
+import { parseDocx } from './parsers/docx-parser.js';
+import { validateIntake, getIntakeSchema } from './parsers/intake-validator.js';
 
 const router = express.Router();
 
@@ -325,6 +329,201 @@ router.post('/projects/:id/approvals', (req, res) => {
     console.error('[OPAL] Error submitting approval:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// --- ADA Agent Chat (Stage 1 Interview) ---
+
+/**
+ * POST /api/opal/projects/:id/agent/ada - SSE stream for ADA interview
+ */
+router.post('/projects/:id/agent/ada', async (req, res) => {
+  const { message } = req.body;
+  const projectId = req.params.id;
+
+  if (!message) {
+    return res.status(400).json({ error: 'Message is required' });
+  }
+
+  console.log('[OPAL:ADA] Chat message for project:', projectId);
+
+  // Set up SSE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const heartbeatInterval = setInterval(() => {
+    if (!res.writableEnded) res.write(': heartbeat\n\n');
+  }, 15000);
+
+  res.on('close', () => clearInterval(heartbeatInterval));
+
+  try {
+    const ada = getAdaAgent();
+    let fullText = '';
+
+    for await (const chunk of ada.run(projectId, message)) {
+      if (chunk.type === 'text' && chunk.content) {
+        fullText += chunk.content;
+        res.write(`data: ${JSON.stringify({ type: 'text', content: chunk.content })}\n\n`);
+      } else if (chunk.type === 'done') {
+        // Parse intake_data blocks from the full response
+        const intakeEntries = parseIntakeData(fullText);
+        if (intakeEntries.length > 0) {
+          for (const entry of intakeEntries) {
+            setIntakeAnswer(projectId, entry.section, entry.key, entry.value);
+          }
+          res.write(`data: ${JSON.stringify({ type: 'intake_update', entries: intakeEntries })}\n\n`);
+        }
+
+        // Check gate status
+        const gate = checkIntakeGate(projectId);
+        res.write(`data: ${JSON.stringify({ type: 'gate_status', gate })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      }
+    }
+  } catch (error) {
+    console.error('[OPAL:ADA] Error:', error);
+    res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
+  } finally {
+    clearInterval(heartbeatInterval);
+    if (!res.writableEnded) res.end();
+  }
+});
+
+/**
+ * POST /api/opal/projects/:id/agent/ada/abort - Abort ADA agent
+ */
+router.post('/projects/:id/agent/ada/abort', (req, res) => {
+  const ada = getAdaAgent();
+  const aborted = ada.abort(req.params.id);
+  res.json({ success: aborted });
+});
+
+/**
+ * Parse intake_data code blocks from agent response text.
+ * Format: ```intake_data\n{"section":"A","key":"A1","value":"..."}\n```
+ */
+function parseIntakeData(text) {
+  const entries = [];
+  const regex = /```intake_data\n([\s\S]*?)```/g;
+  let match;
+
+  while ((match = regex.exec(text)) !== null) {
+    const block = match[1].trim();
+    for (const line of block.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed.section && parsed.key && parsed.value !== undefined) {
+          entries.push(parsed);
+        }
+      } catch (_) {
+        console.warn('[OPAL:ADA] Failed to parse intake line:', trimmed);
+      }
+    }
+  }
+
+  return entries;
+}
+
+// --- File Upload (Stage 1 Branch A) ---
+
+/**
+ * POST /api/opal/projects/:id/intake/upload - Upload and parse a questionnaire document
+ */
+router.post('/projects/:id/intake/upload', express.raw({ type: '*/*', limit: '10mb' }), async (req, res) => {
+  const projectId = req.params.id;
+  const contentType = req.headers['content-type'] || '';
+  const filename = req.headers['x-filename'] || 'upload';
+
+  console.log('[OPAL:Upload] File received for project:', projectId, 'type:', contentType);
+
+  try {
+    let text = '';
+
+    if (contentType.includes('pdf') || filename.endsWith('.pdf')) {
+      text = await parsePdf(req.body);
+    } else if (contentType.includes('docx') || contentType.includes('officedocument') || filename.endsWith('.docx')) {
+      text = await parseDocx(req.body);
+    } else if (contentType.includes('text') || filename.endsWith('.txt')) {
+      text = req.body.toString('utf-8');
+    } else {
+      return res.status(400).json({ error: 'Unsupported file type. Please upload PDF, DOCX, or TXT.' });
+    }
+
+    if (!text || text.trim().length === 0) {
+      return res.status(400).json({ error: 'No text content could be extracted from the file.' });
+    }
+
+    console.log('[OPAL:Upload] Extracted text length:', text.length);
+
+    // Use ADA agent to parse the document against the intake schema
+    const ada = getAdaAgent();
+    const parsePrompt = `I have received a completed Brand Intelligence Intake Questionnaire. Please analyze the following document text and extract all answers into the structured intake_data format. Map each answer to the correct section and key based on our intake schema.
+
+Document content:
+---
+${text.substring(0, 15000)}
+---
+
+Extract ALL identifiable answers and output them in \`\`\`intake_data blocks. Be thorough — capture every piece of information that maps to our questionnaire sections (A through H).`;
+
+    // Collect the full response
+    let fullText = '';
+    const chunks = [];
+
+    for await (const chunk of ada.run(projectId, parsePrompt, { includeIntake: false })) {
+      if (chunk.type === 'text' && chunk.content) {
+        fullText += chunk.content;
+        chunks.push(chunk.content);
+      }
+    }
+
+    // Parse extracted data
+    const entries = parseIntakeData(fullText);
+    for (const entry of entries) {
+      setIntakeAnswer(projectId, entry.section, entry.key, entry.value);
+    }
+
+    // Validate
+    const validation = validateIntake(projectId);
+
+    res.json({
+      success: true,
+      extractedText: text.substring(0, 500) + (text.length > 500 ? '...' : ''),
+      entriesFound: entries.length,
+      entries,
+      validation,
+    });
+  } catch (error) {
+    console.error('[OPAL:Upload] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Intake Validation ---
+
+/**
+ * GET /api/opal/projects/:id/intake/validate - Run the quality gate check
+ */
+router.get('/projects/:id/intake/validate', (req, res) => {
+  try {
+    const validation = validateIntake(req.params.id);
+    res.json(validation);
+  } catch (error) {
+    console.error('[OPAL:Validate] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/opal/intake-schema - Get the intake questionnaire schema
+ */
+router.get('/intake-schema', (_req, res) => {
+  res.json(getIntakeSchema());
 });
 
 // --- Stage Definitions ---

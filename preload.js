@@ -239,6 +239,64 @@ contextBridge.exposeInMainWorld('opalAPI', {
     return response.json();
   },
 
+  // --- ADA Agent Chat (Stage 1) ---
+  sendAdaMessage: async (projectId, message) => {
+    return new Promise((resolve, reject) => {
+      fetch(`${SERVER_URL}/api/opal/projects/${projectId}/agent/ada`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message }),
+      })
+        .then(response => {
+          resolve({
+            getReader: async function() {
+              const reader = response.body.getReader();
+              const decoder = new TextDecoder();
+              return {
+                read: async () => {
+                  const { done, value } = await reader.read();
+                  return { done, value: done ? undefined : decoder.decode(value, { stream: true }) };
+                }
+              };
+            }
+          });
+        })
+        .catch(reject);
+    });
+  },
+
+  abortAda: async (projectId) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/agent/ada/abort`, {
+      method: 'POST',
+    });
+    return response.json();
+  },
+
+  // --- File Upload (Stage 1) ---
+  uploadIntakeFile: async (projectId, file) => {
+    const buffer = await file.arrayBuffer();
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/intake/upload`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+        'X-Filename': file.name,
+      },
+      body: buffer,
+    });
+    return response.json();
+  },
+
+  // --- Intake Validation ---
+  validateIntake: async (projectId) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/intake/validate`);
+    return response.json();
+  },
+
+  getIntakeSchema: async () => {
+    const response = await fetch(`${SERVER_URL}/api/opal/intake-schema`);
+    return response.json();
+  },
+
   // --- Stage Definitions ---
   getStageDefinitions: async () => {
     const response = await fetch(`${SERVER_URL}/api/opal/stages`);
