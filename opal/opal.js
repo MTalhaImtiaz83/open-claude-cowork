@@ -8,6 +8,7 @@
 import { PipelineView } from './modules/pipeline-view.js';
 import { CovenantGate } from './modules/stage-0-covenant.js';
 import { IntakeRouter } from './modules/stage-1-intake.js';
+import { LogoFactory } from './modules/stage-2-logo.js';
 
 // --- State ---
 let currentProject = null;
@@ -263,8 +264,9 @@ async function getStageModule(stageId) {
     case 1:
       stageModules[1] = new IntakeRouter();
       return stageModules[1];
-    // Future stages will be added here as they're built
-    // case 2: stageModules[2] = new LogoFactory(); return stageModules[2];
+    case 2:
+      stageModules[2] = new LogoFactory();
+      return stageModules[2];
     default:
       return null;
   }

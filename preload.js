@@ -286,6 +286,71 @@ contextBridge.exposeInMainWorld('opalAPI', {
     return response.json();
   },
 
+  // --- Logo Factory (Stage 2) ---
+  getLogoRecipes: async (projectId) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/logo/recipes`);
+    return response.json();
+  },
+
+  generateLogo: async (projectId, recipe = null, customPrompt = null) => {
+    return new Promise((resolve, reject) => {
+      fetch(`${SERVER_URL}/api/opal/projects/${projectId}/logo/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipe, customPrompt }),
+      })
+        .then(response => {
+          resolve({
+            getReader: async function() {
+              const reader = response.body.getReader();
+              const decoder = new TextDecoder();
+              return {
+                read: async () => {
+                  const { done, value } = await reader.read();
+                  return { done, value: done ? undefined : decoder.decode(value, { stream: true }) };
+                }
+              };
+            }
+          });
+        })
+        .catch(reject);
+    });
+  },
+
+  critiqueLogo: async (projectId, svgCode) => {
+    return new Promise((resolve, reject) => {
+      fetch(`${SERVER_URL}/api/opal/projects/${projectId}/logo/critique`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ svgCode }),
+      })
+        .then(response => {
+          resolve({
+            getReader: async function() {
+              const reader = response.body.getReader();
+              const decoder = new TextDecoder();
+              return {
+                read: async () => {
+                  const { done, value } = await reader.read();
+                  return { done, value: done ? undefined : decoder.decode(value, { stream: true }) };
+                }
+              };
+            }
+          });
+        })
+        .catch(reject);
+    });
+  },
+
+  validateSvg: async (projectId, svgCode) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/logo/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ svgCode }),
+    });
+    return response.json();
+  },
+
   // --- Intake Validation ---
   validateIntake: async (projectId) => {
     const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/intake/validate`);

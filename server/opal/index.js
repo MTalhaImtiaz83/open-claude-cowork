@@ -20,9 +20,19 @@ import {
 } from './pipeline.js';
 import { ensureProjectDir, listAssets, saveAsset, readAsset, approveAsset } from './vault.js';
 import { getAdaAgent } from './agents/ada-agent.js';
+import { getLogoAgent } from './agents/logo-agent.js';
+import { getCraftCriticAgent } from './agents/craft-critic.js';
 import { parsePdf } from './parsers/pdf-parser.js';
 import { parseDocx } from './parsers/docx-parser.js';
 import { validateIntake, getIntakeSchema } from './parsers/intake-validator.js';
+import { validateSvg, extractSvgFromText } from './parsers/svg-validator.js';
+import yaml from 'js-yaml';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const router = express.Router();
 
@@ -502,6 +512,190 @@ Extract ALL identifiable answers and output them in \`\`\`intake_data blocks. Be
     console.error('[OPAL:Upload] Error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// --- Logo Factory (Stage 2) ---
+
+/**
+ * GET /api/opal/projects/:id/logo/recipes - Get matching logo recipes based on brand archetype
+ */
+router.get('/projects/:id/logo/recipes', (req, res) => {
+  try {
+    const intake = getIntakeAnswers(req.params.id);
+    const archetype = intake.B?.B2 || 'The Creator'; // Default archetype
+
+    // Load all recipe files
+    const recipesDir = path.join(__dirname, 'knowledge', 'logo-recipes');
+    const files = fs.readdirSync(recipesDir).filter(f => f.endsWith('.yaml'));
+
+    const allRecipes = files.map(f => {
+      const content = fs.readFileSync(path.join(recipesDir, f), 'utf-8');
+      return yaml.load(content);
+    });
+
+    // Find matching recipes (fuzzy match on archetype name)
+    const archetypeLower = archetype.toLowerCase();
+    const matched = allRecipes.filter(r =>
+      archetypeLower.includes(r.archetype.toLowerCase().replace('the ', ''))
+    );
+
+    // If no exact match, return 2-3 closest + fallback
+    const recipes = matched.length > 0 ? matched : allRecipes.slice(0, 3);
+
+    res.json({
+      brandArchetype: archetype,
+      recipes,
+      totalAvailable: allRecipes.length,
+    });
+  } catch (error) {
+    console.error('[OPAL:Logo] Error loading recipes:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/opal/projects/:id/logo/generate - SSE stream for logo generation
+ */
+router.post('/projects/:id/logo/generate', async (req, res) => {
+  const { recipe, customPrompt } = req.body;
+  const projectId = req.params.id;
+
+  console.log('[OPAL:Logo] Generating logo for project:', projectId);
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const heartbeatInterval = setInterval(() => {
+    if (!res.writableEnded) res.write(': heartbeat\n\n');
+  }, 15000);
+
+  res.on('close', () => clearInterval(heartbeatInterval));
+
+  try {
+    const intake = getIntakeAnswers(projectId);
+    const brandName = intake.A?.A1 || 'Brand';
+    const archetype = intake.B?.B2 || 'The Creator';
+
+    let prompt = `Generate 2-3 SVG logomark variations for "${brandName}".
+
+Brand Archetype: ${archetype}`;
+
+    if (recipe) {
+      prompt += `\n\nUse this recipe as guidance:\n${JSON.stringify(recipe, null, 2)}`;
+    }
+
+    if (customPrompt) {
+      prompt += `\n\nAdditional instructions: ${customPrompt}`;
+    }
+
+    const logoAgent = getLogoAgent();
+    let fullText = '';
+
+    for await (const chunk of logoAgent.run(projectId, prompt)) {
+      if (chunk.type === 'text' && chunk.content) {
+        fullText += chunk.content;
+        res.write(`data: ${JSON.stringify({ type: 'text', content: chunk.content })}\n\n`);
+      } else if (chunk.type === 'done') {
+        // Extract SVGs from the response
+        const svgs = extractSvgFromText(fullText);
+        const results = svgs.map((svg, i) => {
+          const validation = validateSvg(svg);
+          return { index: i, svg, validation };
+        });
+
+        // Save valid SVGs to vault
+        for (const result of results) {
+          if (result.validation.valid) {
+            const filename = `logo-v${Date.now()}-${result.index}.svg`;
+            const saved = saveAsset(projectId, 'logo', 2, filename, result.svg, {
+              archetype,
+              recipe: recipe?.name || 'custom',
+              validation: result.validation,
+            });
+            result.assetId = saved.id;
+          }
+        }
+
+        res.write(`data: ${JSON.stringify({ type: 'logos', results })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      }
+    }
+  } catch (error) {
+    console.error('[OPAL:Logo] Error:', error);
+    res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
+  } finally {
+    clearInterval(heartbeatInterval);
+    if (!res.writableEnded) res.end();
+  }
+});
+
+/**
+ * POST /api/opal/projects/:id/logo/critique - SSE stream for SVG critique
+ */
+router.post('/projects/:id/logo/critique', async (req, res) => {
+  const { svgCode } = req.body;
+  const projectId = req.params.id;
+
+  if (!svgCode) {
+    return res.status(400).json({ error: 'svgCode is required' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const heartbeatInterval = setInterval(() => {
+    if (!res.writableEnded) res.write(': heartbeat\n\n');
+  }, 15000);
+
+  res.on('close', () => clearInterval(heartbeatInterval));
+
+  try {
+    const critic = getCraftCriticAgent();
+    let fullText = '';
+
+    for await (const chunk of critic.run(projectId, svgCode)) {
+      if (chunk.type === 'text' && chunk.content) {
+        fullText += chunk.content;
+        res.write(`data: ${JSON.stringify({ type: 'text', content: chunk.content })}\n\n`);
+      } else if (chunk.type === 'done') {
+        // Try to parse craft_report from the response
+        const reportMatch = fullText.match(/```craft_report\n([\s\S]*?)```/);
+        let report = null;
+        if (reportMatch) {
+          try {
+            report = JSON.parse(reportMatch[1].trim());
+          } catch (_) { /* report parsing failed, that's ok */ }
+        }
+
+        res.write(`data: ${JSON.stringify({ type: 'critique', report })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      }
+    }
+  } catch (error) {
+    console.error('[OPAL:Critic] Error:', error);
+    res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
+  } finally {
+    clearInterval(heartbeatInterval);
+    if (!res.writableEnded) res.end();
+  }
+});
+
+/**
+ * POST /api/opal/projects/:id/logo/validate - Programmatic SVG validation
+ */
+router.post('/projects/:id/logo/validate', (req, res) => {
+  const { svgCode } = req.body;
+  if (!svgCode) {
+    return res.status(400).json({ error: 'svgCode is required' });
+  }
+  const result = validateSvg(svgCode);
+  res.json(result);
 });
 
 // --- Intake Validation ---
