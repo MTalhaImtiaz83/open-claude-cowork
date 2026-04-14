@@ -116,3 +116,141 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   }
 });
+
+// Expose OPAL Pipeline API to renderer process
+contextBridge.exposeInMainWorld('opalAPI', {
+  // --- Project Operations ---
+  createProject: async (name) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    return response.json();
+  },
+
+  listProjects: async () => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects`);
+    return response.json();
+  },
+
+  getProject: async (projectId) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}`);
+    return response.json();
+  },
+
+  getProjectSummary: async (projectId) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/summary`);
+    return response.json();
+  },
+
+  // --- Covenant Gate ---
+  agreeCovenant: async (projectId, identity) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/covenant`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identity }),
+    });
+    return response.json();
+  },
+
+  // --- Pipeline State ---
+  transitionStage: async (projectId, stage, status, node = null) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/stages/${stage}/transition`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, node }),
+    });
+    return response.json();
+  },
+
+  advancePipeline: async (projectId) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/advance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    return response.json();
+  },
+
+  // --- Intake ---
+  getIntake: async (projectId) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/intake`);
+    return response.json();
+  },
+
+  saveIntakeAnswer: async (projectId, section, key, value) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/intake`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ section, key, value }),
+    });
+    return response.json();
+  },
+
+  saveIntakeBatch: async (projectId, answers) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/intake/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answers }),
+    });
+    return response.json();
+  },
+
+  // --- Vault ---
+  getVaultAssets: async (projectId, type = null) => {
+    const url = type
+      ? `${SERVER_URL}/api/opal/projects/${projectId}/vault?type=${type}`
+      : `${SERVER_URL}/api/opal/projects/${projectId}/vault`;
+    const response = await fetch(url);
+    return response.json();
+  },
+
+  saveVaultAsset: async (projectId, type, stage, filename, content, metadata = {}) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/vault`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, stage, filename, content, metadata }),
+    });
+    return response.json();
+  },
+
+  approveVaultAsset: async (projectId, assetId) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/vault/${assetId}/approve`, {
+      method: 'POST',
+    });
+    return response.json();
+  },
+
+  // --- Approvals ---
+  getApprovals: async (projectId, stage = null) => {
+    const url = stage !== null
+      ? `${SERVER_URL}/api/opal/projects/${projectId}/approvals?stage=${stage}`
+      : `${SERVER_URL}/api/opal/projects/${projectId}/approvals`;
+    const response = await fetch(url);
+    return response.json();
+  },
+
+  submitApproval: async (projectId, stage, node, approvedBy, approved, notes = '') => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/approvals`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage, node, approvedBy, approved, notes }),
+    });
+    return response.json();
+  },
+
+  // --- Stage Definitions ---
+  getStageDefinitions: async () => {
+    const response = await fetch(`${SERVER_URL}/api/opal/stages`);
+    return response.json();
+  },
+
+  // --- Navigation ---
+  navigateToChat: () => {
+    ipcRenderer.send('navigate', 'chat');
+  },
+
+  navigateToOpal: () => {
+    ipcRenderer.send('navigate', 'opal');
+  },
+});

@@ -6,6 +6,7 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 import { Composio } from '@composio/core';
 import { getProvider, getAvailableProviders, initializeProviders } from './providers/index.js';
+import { registerOpalRoutes } from './opal/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -219,6 +220,9 @@ app.get('/api/health', (_req, res) => {
 
 await initializeProviders();
 await initializeComposioSession();
+
+// Initialize OPAL pipeline routes and database
+registerOpalRoutes(app);
 
 // Start server and keep reference to prevent garbage collection
 const server = app.listen(PORT, () => {
