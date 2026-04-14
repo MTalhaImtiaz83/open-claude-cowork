@@ -9,6 +9,10 @@ import { PipelineView } from './modules/pipeline-view.js';
 import { CovenantGate } from './modules/stage-0-covenant.js';
 import { IntakeRouter } from './modules/stage-1-intake.js';
 import { LogoFactory } from './modules/stage-2-logo.js';
+import { CreativeFoundation } from './modules/stage-3-creative.js';
+import { BrandSpeakEngine } from './modules/stage-4-voice.js';
+import { HomepageBuild } from './modules/stage-5-homepage.js';
+import { ContentEngine } from './modules/stage-6-content.js';
 
 // --- State ---
 let currentProject = null;
@@ -267,6 +271,18 @@ async function getStageModule(stageId) {
     case 2:
       stageModules[2] = new LogoFactory();
       return stageModules[2];
+    case 3:
+      stageModules[3] = new CreativeFoundation();
+      return stageModules[3];
+    case 4:
+      stageModules[4] = new BrandSpeakEngine();
+      return stageModules[4];
+    case 5:
+      stageModules[5] = new HomepageBuild();
+      return stageModules[5];
+    case 6:
+      stageModules[6] = new ContentEngine();
+      return stageModules[6];
     default:
       return null;
   }

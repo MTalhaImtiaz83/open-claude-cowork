@@ -10,6 +10,11 @@ import {
   getApprovals,
   addApproval,
   getVaultAssets as dbGetVaultAssets,
+  setDesignSystem,
+  getDesignSystem,
+  setVoiceAnchor as dbSetVoiceAnchor,
+  getVoiceAnchor as dbGetVoiceAnchor,
+  setContentCalendar,
 } from './database.js';
 import {
   STAGES,
@@ -22,6 +27,11 @@ import { ensureProjectDir, listAssets, saveAsset, readAsset, approveAsset } from
 import { getAdaAgent } from './agents/ada-agent.js';
 import { getLogoAgent } from './agents/logo-agent.js';
 import { getCraftCriticAgent } from './agents/craft-critic.js';
+import { getVibeAgent } from './agents/vibe-agent.js';
+import { getVoiceAgent } from './agents/voice-agent.js';
+import { getCreativeDirectorAgent } from './agents/cd-agent.js';
+import { getContentStrategyAgent } from './agents/csa-agent.js';
+import { saveVoiceFile, saveHomepageExport, saveContentCalendar as saveCalendarFile } from './vault.js';
 import { parsePdf } from './parsers/pdf-parser.js';
 import { parseDocx } from './parsers/docx-parser.js';
 import { validateIntake, getIntakeSchema } from './parsers/intake-validator.js';
@@ -696,6 +706,265 @@ router.post('/projects/:id/logo/validate', (req, res) => {
   }
   const result = validateSvg(svgCode);
   res.json(result);
+});
+
+// --- Stage 3: Creative Foundation ---
+
+/**
+ * POST /api/opal/projects/:id/vibe/generate - SSE stream for vibe thesis generation
+ */
+router.post('/projects/:id/vibe/generate', async (req, res) => {
+  const projectId = req.params.id;
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n'); }, 15000);
+  res.on('close', () => clearInterval(heartbeat));
+
+  try {
+    const vibe = getVibeAgent();
+    const intake = getIntakeAnswers(projectId);
+    const brandName = intake.A?.A1 || 'Brand';
+    const prompt = `Generate 3 distinct emotional vibe theses for "${brandName}". Use the brand intake data to inform each thesis. Make them genuinely different in energy and direction.`;
+
+    let fullText = '';
+    for await (const chunk of vibe.run(projectId, prompt)) {
+      if (chunk.type === 'text' && chunk.content) {
+        fullText += chunk.content;
+        res.write(`data: ${JSON.stringify({ type: 'text', content: chunk.content })}\n\n`);
+      } else if (chunk.type === 'done') {
+        // Extract vibe_theses JSON block
+        const match = fullText.match(/```vibe_theses\n([\s\S]*?)```/);
+        let theses = null;
+        if (match) {
+          try { theses = JSON.parse(match[1].trim()); } catch (_) {}
+        }
+        res.write(`data: ${JSON.stringify({ type: 'vibes', theses })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      }
+    }
+  } catch (error) {
+    res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
+  } finally {
+    clearInterval(heartbeat);
+    if (!res.writableEnded) res.end();
+  }
+});
+
+/**
+ * POST /api/opal/projects/:id/design-system - Save extracted design system
+ */
+router.post('/projects/:id/design-system', (req, res) => {
+  try {
+    const { tokens, typography, colors } = req.body;
+    setDesignSystem(req.params.id, tokens || {}, typography || {}, colors || {});
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/opal/projects/:id/design-system - Get design system
+ */
+router.get('/projects/:id/design-system', (req, res) => {
+  try {
+    const ds = getDesignSystem(req.params.id);
+    res.json(ds || { tokens: {}, typography: {}, colors: {} });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Stage 4: Brand Speak Engine ---
+
+/**
+ * POST /api/opal/projects/:id/voice/generate - SSE stream for voice YAML generation
+ */
+router.post('/projects/:id/voice/generate', async (req, res) => {
+  const projectId = req.params.id;
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n'); }, 15000);
+  res.on('close', () => clearInterval(heartbeat));
+
+  try {
+    const voice = getVoiceAgent();
+    const intake = getIntakeAnswers(projectId);
+    const brandName = intake.A?.A1 || 'Brand';
+    const prompt = `Build the complete Voice Prompt Injection YAML for "${brandName}". This will anchor ALL future content generation. Be specific and actionable.`;
+
+    let fullText = '';
+    for await (const chunk of voice.run(projectId, prompt)) {
+      if (chunk.type === 'text' && chunk.content) {
+        fullText += chunk.content;
+        res.write(`data: ${JSON.stringify({ type: 'text', content: chunk.content })}\n\n`);
+      } else if (chunk.type === 'done') {
+        const match = fullText.match(/```voice_anchor\n([\s\S]*?)```/);
+        const yamlContent = match ? match[1].trim() : null;
+        res.write(`data: ${JSON.stringify({ type: 'voice_yaml', yaml: yamlContent })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      }
+    }
+  } catch (error) {
+    res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
+  } finally {
+    clearInterval(heartbeat);
+    if (!res.writableEnded) res.end();
+  }
+});
+
+/**
+ * POST /api/opal/projects/:id/voice/save - Lock the voice anchor YAML
+ */
+router.post('/projects/:id/voice/save', (req, res) => {
+  try {
+    const { yaml: yamlContent } = req.body;
+    if (!yamlContent) return res.status(400).json({ error: 'YAML content is required' });
+
+    dbSetVoiceAnchor(req.params.id, yamlContent);
+    saveVoiceFile(req.params.id, yamlContent);
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/opal/projects/:id/voice - Get current voice anchor
+ */
+router.get('/projects/:id/voice', (req, res) => {
+  try {
+    const yamlContent = dbGetVoiceAnchor(req.params.id);
+    res.json({ yaml: yamlContent });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Stage 5: Homepage Build ---
+
+/**
+ * POST /api/opal/projects/:id/homepage/generate - SSE stream for homepage generation
+ */
+router.post('/projects/:id/homepage/generate', async (req, res) => {
+  const projectId = req.params.id;
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n'); }, 15000);
+  res.on('close', () => clearInterval(heartbeat));
+
+  try {
+    const cd = getCreativeDirectorAgent();
+    const intake = getIntakeAnswers(projectId);
+    const brandName = intake.A?.A1 || 'Brand';
+    const markets = intake.A?.A6 || '';
+    const isRTL = markets.toLowerCase().includes('mena') || markets.toLowerCase().includes('gcc') || markets.toLowerCase().includes('arab');
+
+    let prompt = `Generate a complete production-ready homepage for "${brandName}".
+
+Use the design system tokens, logo from the vault, and brand voice anchor to create a cohesive, animated landing page.
+
+Include sections: Hero with logo, Value Proposition, Features/Services, Social Proof, CTA, Footer.`;
+
+    if (isRTL) {
+      prompt += '\n\nIMPORTANT: This brand serves MENA/GCC markets. Build with RTL-first layout, Arabic typography, and direction-aware animations.';
+    }
+
+    let fullText = '';
+    for await (const chunk of cd.run(projectId, prompt)) {
+      if (chunk.type === 'text' && chunk.content) {
+        fullText += chunk.content;
+        res.write(`data: ${JSON.stringify({ type: 'text', content: chunk.content })}\n\n`);
+      } else if (chunk.type === 'done') {
+        // Extract homepage HTML
+        const match = fullText.match(/```homepage\n([\s\S]*?)```/) || fullText.match(/```html\n([\s\S]*?)```/);
+        const html = match ? match[1].trim() : null;
+
+        if (html) {
+          saveHomepageExport(projectId, { 'index.html': html });
+        }
+
+        res.write(`data: ${JSON.stringify({ type: 'homepage', html })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      }
+    }
+  } catch (error) {
+    res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
+  } finally {
+    clearInterval(heartbeat);
+    if (!res.writableEnded) res.end();
+  }
+});
+
+// --- Stage 6: Content Strategy ---
+
+/**
+ * POST /api/opal/projects/:id/content/generate - SSE stream for content strategy
+ */
+router.post('/projects/:id/content/generate', async (req, res) => {
+  const { layer } = req.body; // 'macro', 'meso', or 'micro'
+  const projectId = req.params.id;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n'); }, 15000);
+  res.on('close', () => clearInterval(heartbeat));
+
+  try {
+    const csa = getContentStrategyAgent();
+    const intake = getIntakeAnswers(projectId);
+    const brandName = intake.A?.A1 || 'Brand';
+
+    const prompts = {
+      macro: `Generate the 90-Day Narrative Arc (Layer 1: Macro) for "${brandName}". Create a 3-month content strategy with monthly themes, narratives, key messages, and content ratios. Output in the content_macro JSON format.`,
+      meso: `Generate the Weekly Content Pillars (Layer 2: Meso) for "${brandName}". Break down each month into 4 weekly pillars with specific pain points addressed and platform distribution. Output in the content_meso JSON format.`,
+      micro: `Generate specific content assets (Layer 3: Micro) for "${brandName}" for Week 1. Create LinkedIn carousel, Twitter thread, and email nurture sequence. Output in the content_micro JSON format.`,
+    };
+
+    const prompt = prompts[layer] || prompts.macro;
+    let fullText = '';
+
+    for await (const chunk of csa.run(projectId, prompt)) {
+      if (chunk.type === 'text' && chunk.content) {
+        fullText += chunk.content;
+        res.write(`data: ${JSON.stringify({ type: 'text', content: chunk.content })}\n\n`);
+      } else if (chunk.type === 'done') {
+        // Extract content JSON block
+        const blockName = `content_${layer || 'macro'}`;
+        const match = fullText.match(new RegExp(`\`\`\`${blockName}\\n([\\s\\S]*?)\`\`\``));
+        let contentData = null;
+        if (match) {
+          try { contentData = JSON.parse(match[1].trim()); } catch (_) {}
+        }
+
+        if (contentData) {
+          setContentCalendar(projectId, layer || 'macro', contentData);
+          saveCalendarFile(projectId, { [layer || 'macro']: contentData });
+        }
+
+        res.write(`data: ${JSON.stringify({ type: 'content', layer: layer || 'macro', data: contentData })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      }
+    }
+  } catch (error) {
+    res.write(`data: ${JSON.stringify({ type: 'error', message: error.message })}\n\n`);
+  } finally {
+    clearInterval(heartbeat);
+    if (!res.writableEnded) res.end();
+  }
 });
 
 // --- Intake Validation ---

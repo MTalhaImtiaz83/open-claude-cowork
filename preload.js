@@ -117,6 +117,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   }
 });
 
+// Helper: fetch SSE stream and return a reader-compatible object
+function fetchSSE(url, method = 'POST', body = null) {
+  return new Promise((resolve, reject) => {
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    fetch(url, opts)
+      .then(response => {
+        resolve({
+          getReader: async function() {
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            return {
+              read: async () => {
+                const { done, value } = await reader.read();
+                return { done, value: done ? undefined : decoder.decode(value, { stream: true }) };
+              }
+            };
+          }
+        });
+      })
+      .catch(reject);
+  });
+}
+
 // Expose OPAL Pipeline API to renderer process
 contextBridge.exposeInMainWorld('opalAPI', {
   // --- Project Operations ---
@@ -360,6 +384,54 @@ contextBridge.exposeInMainWorld('opalAPI', {
   getIntakeSchema: async () => {
     const response = await fetch(`${SERVER_URL}/api/opal/intake-schema`);
     return response.json();
+  },
+
+  // --- Stage 3: Creative Foundation ---
+  generateVibes: async (projectId) => {
+    return fetchSSE(`${SERVER_URL}/api/opal/projects/${projectId}/vibe/generate`, 'POST');
+  },
+
+  saveDesignSystem: async (projectId, tokens, typography, colors) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/design-system`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tokens, typography, colors }),
+    });
+    return response.json();
+  },
+
+  getDesignSystem: async (projectId) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/design-system`);
+    return response.json();
+  },
+
+  // --- Stage 4: Brand Speak Engine ---
+  generateVoice: async (projectId) => {
+    return fetchSSE(`${SERVER_URL}/api/opal/projects/${projectId}/voice/generate`, 'POST');
+  },
+
+  saveVoiceAnchor: async (projectId, yaml) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/voice/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ yaml }),
+    });
+    return response.json();
+  },
+
+  getVoiceAnchor: async (projectId) => {
+    const response = await fetch(`${SERVER_URL}/api/opal/projects/${projectId}/voice`);
+    return response.json();
+  },
+
+  // --- Stage 5: Homepage Build ---
+  generateHomepage: async (projectId) => {
+    return fetchSSE(`${SERVER_URL}/api/opal/projects/${projectId}/homepage/generate`, 'POST');
+  },
+
+  // --- Stage 6: Content Strategy ---
+  generateContent: async (projectId, layer = 'macro') => {
+    return fetchSSE(`${SERVER_URL}/api/opal/projects/${projectId}/content/generate`, 'POST', { layer });
   },
 
   // --- Stage Definitions ---
