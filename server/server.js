@@ -68,6 +68,9 @@ function updateOpencodeConfig(mcpUrl, mcpHeaders) {
 app.use(cors());
 app.use(express.json());
 
+// Serve OPAL frontend as static files at /opal/
+app.use('/opal', express.static(path.join(__dirname, '..', 'opal')));
+
 // Chat endpoint using provider abstraction
 app.post('/api/chat', async (req, res) => {
   const {
